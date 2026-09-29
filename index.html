@@ -103,5 +103,78 @@ $('exportCsv').onclick=()=>{let rows=[['Bill ID','Thời gian','Nơi','Người 
 $('exportView').onclick=()=>{let L=ledger(data),body='<h1>Trip Ledger · Bản xem</h1><p>Snapshot xuất lúc '+esc(new Date().toLocaleString('vi-VN'))+'. Không tự cập nhật.</p><p>'+esc(L.ready?'Sẵn sàng đối chiếu':'CHƯA CHỐT: '+L.issues.length+' lỗi/chờ chia; '+L.estimated+' ước tính')+'</p><h2>Balance VND</h2>'+PEOPLE.map(p=>line(p,fmt(L.rounded[p]))).join('')+'<h2>Chi tiêu từng người</h2>'+PEOPLE.map(p=>'<h3>'+esc(p)+'</h3>'+personHistory(data,p).map(e=>line(e.when+' · '+e.title+(e.actual?'':' (ước tính)'),fmt(e.share))).join('')).join('')+'<h2>Chi tiết bill</h2>'+data.bills.map(b=>'<h3>'+esc(b.title)+'</h3>'+detail(b,data.rate)).join('<hr>');let page='<!doctype html><html lang="vi"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>Trip Ledger · Bản xem</title><style>body{font:15px system-ui;max-width:850px;margin:auto;padding:15px;color:#183447}.line{display:flex;justify-content:space-between;gap:10px;border-bottom:1px solid #ddd;padding:7px 0}.line span:last-child{text-align:right}.tile{padding:9px;background:#eef6f6;margin:5px 0;border-radius:8px}.muted{color:#667;font-size:13px}</style>'+body+'</html>';download('trip-ledger-view.html',page,'text/html;charset=utf-8')};
 $('importJson').onchange=async e=>{let file=e.target.files?.[0];if(!file)return;try{let obj=validateImport(JSON.parse(await file.text()));if(!confirm('THAY THẾ TOÀN BỘ sổ hiện tại? Xuất JSON hiện tại trước khi tiếp tục.'))return;data=obj;persist();render();toast('Đã khôi phục. Kiểm tra bill và balance.')}catch(err){toast('Không nhập được: '+err.message)}finally{e.target.value=''}};
 window.addEventListener('beforeunload',e=>{if(changesSinceBackup()>0){e.preventDefault();e.returnValue=''}});
+/* ==== TRIP LEDGER SYNC — dán ngay TRƯỚC dòng: askPersist();render();renderStorageState()} ==== */
+let syncState={busy:false,queued:false,lastOk:data.lastSyncAt||null,lastError:null};
+
+function syncConfig(){return {url:(data.syncUrl||'').trim(),key:(data.syncKey||'').trim()}}
+
+function viewTables(){
+ const L=ledger(data);
+ const bills=[['Thoi gian','Noi mua','Nguoi tra','Phuong thuc','Bill CNY','VND thuc','Ty gia du phong','Ty gia thuc te','Chenh VND','Trang thai','Ghi chu']];
+ for(const b of data.bills){
+  const r=rates(b,data.rate),a=allocation(b,data.rate),err=validateBill(b);
+  bills.push([displayWhen(b),b.title,b.payer,b.method||'',r.cny??'',r.actual??'',r.provisional??'',r.real!==null?Number(r.real.toFixed(2)):'',r.delta??'',err||(!a.ok?a.reason:(r.actual!==null?'Co VND thuc':'Uoc tinh')),b.note||'']);
+ }
+ const split=[['Thoi gian','Noi mua','Nguoi tra','Nguoi chiu','Phan VND','VND du phong','Chenh VND','Trang thai']];
+ for(const p of PEOPLE)for(const e of personHistory(data,p))split.push([e.when,e.title,e.payer,p,e.share,e.estimatedShare??'',e.deltaShare??'',e.actual?'Co VND thuc':'Uoc tinh']);
+ const balance=[['Nguoi','Chi phi phai chiu','Da ung tra bill','Da chuyen','Da nhan','Balance chot','Y nghia']];
+ for(const p of PEOPLE){
+  const v=L.rounded[p];
+  balance.push([p,L.shares[p],L.paid[p],L.sent[p],L.received[p],v,v<0?'Tra Cheese':v>0?(p==='Cheese'?'Duoc nhan lai':'Cheese tra'):'Da can bang']);
+ }
+ balance.push([]);
+ balance.push(['Tong chi tieu nhom',L.total,'','','','','']);
+ balance.push(['Bill con uoc tinh',L.estimated,'','','','','']);
+ balance.push(['Trang thai',L.ready?'San sang doi chieu':'Chua chot','','','','','']);
+ balance.push(['Cap nhat luc',new Date().toLocaleString('vi-VN'),'','','','','']);
+ for(const s of L.settle)balance.push(['Goi y chuyen tien',s.from+' -> '+s.to,s.amount,'','','','']);
+ return {bills,split,balance};
+}
+
+async function pushSync(){
+ const cfg=syncConfig();
+ if(!cfg.url){syncState.lastError=null;renderSyncState();return}
+ if(syncState.busy){syncState.queued=true;return}
+ syncState.busy=true;syncState.lastError=null;renderSyncState();
+ try{
+  const res=await fetch(cfg.url,{method:'POST',body:JSON.stringify({key:cfg.key,data:data,view:viewTables()})});
+  const out=await res.json();
+  if(!out.ok)throw Error(out.error||'Sheet tu choi ghi');
+  syncState.lastOk=localStamp().replace('T',' ');
+  data.lastSyncAt=syncState.lastOk;persist();
+ }catch(err){
+  syncState.lastError=String(err.message||err);
+ }finally{
+  syncState.busy=false;renderSyncState();
+  if(syncState.queued){syncState.queued=false;pushSync()}
+ }
+}
+
+function renderSyncState(){
+ const el=$('syncState');if(!el)return;
+ const cfg=syncConfig();
+ if(!cfg.url){el.innerHTML='<span class="chip warn">Chua bat dong bo</span>';return}
+ let chip=syncState.busy?'<span class="chip">Dang day len Sheet...</span>'
+  :syncState.lastError?'<span class="chip bad">Dong bo loi</span>'
+  :'<span class="chip good">Da dong bo</span>';
+ el.innerHTML=chip+'<div class="grid"><div class="tile"><small>Lan dong bo gan nhat</small><strong>'+esc(syncState.lastOk||'Chua lan nao')+'</strong></div></div>'
+  +(syncState.lastError?'<p class="notice">Khong day len duoc: '+esc(syncState.lastError)+'. Du lieu van luu tren may. Bam Dong bo ngay khi co mang.</p>':'');
+}
+
+$('saveSync').onclick=()=>{
+ data.syncUrl=get('syncUrl').trim();
+ data.syncKey=get('syncKey').trim();
+ persist();renderSyncState();pushSync();
+ toast(data.syncUrl?'Da luu cau hinh dong bo.':'Da tat dong bo.');
+};
+$('syncNow').onclick=()=>pushSync();
+window.addEventListener('online',()=>{if(syncConfig().url)pushSync()});
+
+for(const id of ['saveBill','deleteBill','savePayment','saveSettings']){
+ const el=$(id);if(!el)continue;
+ const prev=el.onclick;
+ el.onclick=async(...args)=>{await prev?.(...args);if(syncConfig().url)pushSync()};
+}
+/* ==== HET PHAN SYNC ==== */
 askPersist();render();renderStorageState();$('syncUrl').value=data.syncUrl||'';$('syncKey').value=data.syncKey||'';renderSyncState();if(syncConfig().url)pushSync()}
 </script></body></html>
